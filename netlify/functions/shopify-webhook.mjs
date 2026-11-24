@@ -3,6 +3,7 @@ import { getStore } from "@netlify/blobs";
 import { sendRich, toWhatsAppNumber } from "../../lib/whatsapp.mjs";
 import { getOrderInfo, getProductImage } from "../../lib/shopify.mjs";
 import { saveLink, getLink } from "../../lib/links.mjs";
+import { fbSaveOrder, fbSetStatus } from "../../lib/firebase.mjs";
 
 // Rich template names (override in Netlify environment variables if yours differ)
 const T = {
@@ -64,11 +65,36 @@ export default async (req) => {
       if (p.checkout_token) await getStore("checkouts").delete(p.checkout_token);
       await saveLink("o", p.id, p.order_status_url);
 
+      const cod = isCOD(p);
+      await fbSaveOrder(p.id, {
+        orderId: p.id,
+        orderName: p.name,
+        store: shop,
+        createdAt: p.created_at,
+        customerName: [p.shipping_address?.first_name, p.shipping_address?.last_name].filter(Boolean).join(" ") ||
+          [p.customer?.first_name, p.customer?.last_name].filter(Boolean).join(" "),
+        phone: p.shipping_address?.phone || p.phone || p.customer?.phone || null,
+        email: p.email || p.customer?.email || null,
+        city: p.shipping_address?.city || null,
+        state: p.shipping_address?.province || null,
+        pincode: p.shipping_address?.zip || null,
+        total: Number(p.total_price || 0),
+        currency: p.currency,
+        payment: cod ? "COD" : "Prepaid",
+        financialStatus: p.financial_status,
+        items: (p.line_items || []).map((li) => ({
+          title: li.title, variant: li.variant_title || null, sku: li.sku || null,
+          qty: li.quantity, price: Number(li.price || 0), productId: li.product_id || null,
+        })),
+        statusUrl: p.order_status_url || null,
+      });
+      await fbSetStatus(p.id, cod && process.env.COD_VERIFICATION !== "off" ? "cod_pending" : "confirmed");
+
       const phone = orderPhone(p);
       if (!phone) { console.warn("No valid phone on order", p.name); return new Response("no phone"); }
       const image = await getProductImage(shop, firstProductId(p));
 
-      if (isCOD(p) && process.env.COD_VERIFICATION !== "off") {
+      if (cod && process.env.COD_VERIFICATION !== "off") {
         await getStore("cod-orders").setJSON(String(p.id), {
           shop, phone, name: p.name, firstName: firstName(p), createdAt: Date.now(),
         });
@@ -76,18 +102,21 @@ export default async (req) => {
           image,
           body: [firstName(p), p.name, money(p.total_price)],
           buttons: [{ payload: `COD_CONFIRM:${p.id}` }, { payload: `COD_CANCEL:${p.id}` }],
+          meta: { orderId: p.id, orderName: p.name, event: "cod_verification" },
         }));
       } else {
         await once(`${p.id}:confirmed`, () => sendRich(phone, T.confirmed, {
           image,
           body: [firstName(p), p.name, money(p.total_price)],
           buttons: [{ url: p.id }],                       // View Order -> /o/<orderId>
+          meta: { orderId: p.id, orderName: p.name, event: "order_confirmed" },
         }));
       }
     }
 
     // 2. Order cancelled
     if (topic === "orders/cancelled") {
+      await fbSetStatus(p.id, "cancelled", { cancelReason: p.cancel_reason || null });
       const phone = orderPhone(p);
       if (!phone) { console.warn("No valid phone on cancelled order", p.name); return new Response("no phone"); }
       const image = await getProductImage(shop, firstProductId(p));
@@ -95,11 +124,19 @@ export default async (req) => {
         image,
         body: [firstName(p), p.name],
         buttons: [null],                                  // static "Shop Again" button
+        meta: { orderId: p.id, orderName: p.name, event: "order_cancelled" },
       }));
     }
 
     // 3. Shipped (fulfillment created)
     if (topic === "fulfillments/create") {
+      await fbSetStatus(p.order_id, "shipped", {
+        tracking: {
+          company: p.tracking_company || null,
+          number: p.tracking_number || null,
+          url: p.tracking_url || (p.tracking_urls || [])[0] || null,
+        },
+      });
       const phone = toWhatsAppNumber(p.destination?.phone);
       if (!phone) { console.warn("No valid phone on fulfillment", p.name); return new Response("no phone"); }
       const tracking = p.tracking_url || (p.tracking_urls || [])[0] || (await getLink("o", p.order_id));
@@ -109,11 +146,15 @@ export default async (req) => {
         image,
         body: [p.destination?.first_name || "there", fulfillmentOrderName(p), p.tracking_company || "our courier partner"],
         buttons: [{ url: p.id }],                         // Track Shipment -> /t/<fulfillmentId>
+        meta: { orderId: p.order_id, orderName: fulfillmentOrderName(p), event: "shipped" },
       }));
     }
 
     // 4. Out for delivery / 5. Delivered (shipment status updated by the courier)
     if (topic === "fulfillments/update") {
+      if (p.shipment_status === "out_for_delivery" || p.shipment_status === "delivered") {
+        await fbSetStatus(p.order_id, p.shipment_status);
+      }
       const phone = toWhatsAppNumber(p.destination?.phone);
       const name = p.destination?.first_name || "there";
       const orderName = fulfillmentOrderName(p);
@@ -124,10 +165,12 @@ export default async (req) => {
         if (p.shipment_status === "out_for_delivery") {
           await once(`${p.id}:out_for_delivery`, () => sendRich(phone, T.outForDelivery, {
             image, body: [name, orderName], buttons: [{ url: p.id }],   // Track Shipment
+            meta: { orderId: p.order_id, orderName, event: "out_for_delivery" },
           }));
         } else {
           await once(`${p.id}:delivered`, () => sendRich(phone, T.delivered, {
             image, body: [name, orderName], buttons: [null],          // static "Shop Again"
+            meta: { orderId: p.order_id, orderName, event: "delivered" },
           }));
         }
       }
@@ -139,6 +182,7 @@ export default async (req) => {
         .filter((t) => t.kind === "refund" && t.status === "success")
         .reduce((s, t) => s + Number(t.amount || 0), 0);
       if (amount > 0) {
+        await fbSetStatus(p.order_id, "refunded", { refundAmount: amount });
         const o = await getOrderInfo(shop, p.order_id);
         const phone = toWhatsAppNumber(o?.phone);
         if (!phone) { console.warn("No valid phone for refund on order", p.order_id); return new Response("no phone"); }
@@ -148,6 +192,7 @@ export default async (req) => {
           image,
           body: [o.firstName, money(amount), o.name],
           buttons: [{ url: p.order_id }],                 // View Order -> /o/<orderId>
+          meta: { orderId: p.order_id, orderName: o.name, event: "refund" },
         }));
       }
     }
