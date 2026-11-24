@@ -1,0 +1,20 @@
+# Run `shopify app config link` in this folder and pick "Mooneye WhatsApp App".
+# The CLI fills client_id and name. Then keep/merge the sections below and run `shopify app deploy`.
+
+client_id = "PASTE_CLIENT_ID_HERE"
+name = "Mooneye WhatsApp App"
+application_url = "https://YOUR-SITE.netlify.app"
+embedded = false
+
+[access_scopes]
+scopes = "read_orders,read_fulfillments,read_customers"
+
+[auth]
+redirect_urls = ["https://YOUR-SITE.netlify.app/auth/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = ["orders/create", "fulfillments/create"]
+  uri = "https://YOUR-SITE.netlify.app/webhooks/shopify"
