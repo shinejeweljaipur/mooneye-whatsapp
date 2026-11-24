@@ -26,6 +26,7 @@ export default async () => {
       image,
       body: [c.firstName, `Rs. ${Number(c.total || 0).toLocaleString("en-IN")}`],
       buttons: [{ url: key }],                            // Complete Order -> /c/<checkoutToken>
+      meta: { checkout: key, event: "abandoned_cart" },
     });
     await checkouts.setJSON(key, { ...c, reminded: true, remindedAt: now, reminderOk: r.ok });
     if (r.ok) sent++;
