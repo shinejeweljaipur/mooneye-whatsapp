@@ -8,8 +8,7 @@ import { addOrderTags } from "../../lib/shopify.mjs";
 function validMetaSignature(raw, header) {
   if (!process.env.META_APP_SECRET) return false;
   const calc = "sha256=" + crypto.createHmac("sha256", process.env.META_APP_SECRET).update(raw, "utf8").digest("hex");
-  return !!header && header.length === calc.length &&
-    crypto.timingSafeEqual(Buffer.from(header), Buffer.from(calc));
+  return !!header && header.length === calc.length && crypto.timingSafeEqual(Buffer.from(header), Buffer.from(calc));
 }
 
 export default async (req) => {
@@ -23,7 +22,6 @@ export default async (req) => {
     }
     return new Response("Forbidden", { status: 403 });
   }
-
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
   const raw = await req.text();
@@ -58,10 +56,10 @@ export default async (req) => {
 
           if (action === "CONFIRM") {
             await addOrderTags(order.shop, orderId, ["COD Confirmed"]);
-            await sendText(msg.from, `Thank you ${order.firstName}! Your order ${order.name} is confirmed. We will notify you once it ships.`);
+            await sendText(msg.from, `Thank you ${order.firstName}! ✅ Your order *${order.name}* is confirmed. We will notify you once it ships.`);
           } else {
             await addOrderTags(order.shop, orderId, ["COD Cancel Requested"]);
-            await sendText(msg.from, `We have received your cancellation request for order ${order.name}. Our team will process it shortly.`);
+            await sendText(msg.from, `We have received your cancellation request for order *${order.name}*. Our team will process it shortly.`);
           }
           await codOrders.setJSON(orderId, { ...order, status: action, respondedAt: Date.now() });
           console.log("COD reply:", action, order.name);
@@ -71,8 +69,6 @@ export default async (req) => {
       }
     }
   }
-
-  // Always 200 so Meta does not retry
   return new Response("ok");
 };
 
