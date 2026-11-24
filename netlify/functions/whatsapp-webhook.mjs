@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { getStore } from "@netlify/blobs";
 import { sendText } from "../../lib/whatsapp.mjs";
 import { addOrderTags } from "../../lib/shopify.mjs";
+import { fbSetStatus } from "../../lib/firebase.mjs";
 
 function validMetaSignature(raw, header) {
   if (!process.env.META_APP_SECRET) return false;
@@ -56,11 +57,14 @@ export default async (req) => {
 
           if (action === "CONFIRM") {
             await addOrderTags(order.shop, orderId, ["COD Confirmed"]);
-            await sendText(msg.from, `Thank you ${order.firstName}! ✅ Your order *${order.name}* is confirmed. We will notify you once it ships.`);
+            await sendText(msg.from, `Thank you ${order.firstName}! ✅ Your order *${order.name}* is confirmed. We will notify you once it ships.`,
+              { orderId, orderName: order.name, event: "cod_confirmed_reply" });
           } else {
             await addOrderTags(order.shop, orderId, ["COD Cancel Requested"]);
-            await sendText(msg.from, `We have received your cancellation request for order *${order.name}*. Our team will process it shortly.`);
+            await sendText(msg.from, `We have received your cancellation request for order *${order.name}*. Our team will process it shortly.`,
+              { orderId, orderName: order.name, event: "cod_cancel_reply" });
           }
+          await fbSetStatus(orderId, action === "CONFIRM" ? "cod_confirmed" : "cod_cancel_requested");
           await codOrders.setJSON(orderId, { ...order, status: action, respondedAt: Date.now() });
           console.log("COD reply:", action, order.name);
         } catch (err) {
